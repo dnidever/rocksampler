@@ -1,8 +1,8 @@
 
-SpaceRock
-=========
+RockSampler
+===========
 
-Fit SSO orbits to tracklet information
+Sampler SSO orbits for tracklet data
 
 Authors
 -------
@@ -14,20 +14,20 @@ Installation
 
 To install the latest version::
 
-    pip install git+https://github.com/dnidever/spacerock
+    pip install git+https://github.com/dnidever/rocksampler
 
     
 Documentation
 -------------
 
-.. image:: https://readthedocs.org/projects/spacerock/badge/?version=latest
-        :target: http://spacerock.readthedocs.io/
+.. image:: https://readthedocs.org/projects/rocksampler/badge/?version=latest
+        :target: http://rocksampler.readthedocs.io/
 
-See `the documentation <http://spacerock.readthedocs.io>`_ for information on how
-to install and use SpaceRock.
+See `the documentation <http://rocksampler.readthedocs.io>`_ for information on how
+to install and use RockSampler.
 
 License
 -------
 
 .. image:: http://img.shields.io/badge/license-MIT-blue.svg?style=flat
-        :target: https://github.com/dnidever/spacerock/blob/main/LICENSE
+        :target: https://github.com/dnidever/rocksampler/blob/main/LICENSE
