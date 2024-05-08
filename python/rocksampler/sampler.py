@@ -9,10 +9,14 @@ from astroquery.jplhorizons import Horizons
 from astropy.time import Time
 from astropy import units as u
 from astropy.coordinates import SkyCoord
+from . import orbelem
 
 units = Units()
 units.timescale = 'tdb' # JPL gives elements in TDB. This actually matters for precise ephemerides.
 #units.current()
+
+# speed of light in AU/day
+c_au_per_day = 173.14463267
 
 # SSO model
 
@@ -111,6 +115,337 @@ class SSO(object):
             obs = prop.observe(obscode=obscode)
         return obs #.ra.deg,obs.dec.deg
 
+class EarthRock(object):
+
+    def __init__(self):
+        t0 = Time('2000',format='byear').jd
+        rock = SpaceRock(q=0.98327,
+                         e=0.01671022,
+                         inc=0.00005,
+		         node=-11.26064,
+                         arg=102.94719,
+		         M=8.7777999,
+                         epoch=t0,
+                         name='earth',
+                         origin='ssb',
+                         frame='eclipJ2000',
+                         units=units)
+        self._data = rock
+
+    def __call__(self,t):
+        """ Get the position at a time JD time."""
+        t = np.atleast_1d(np.array(t))
+        rock = self._data
+        out = []
+        for i in range(len(t)):
+            #prop,planets,sim = prop.propagate(epochs=t[i],progress=False)
+            # analytic_propagate() preserves the orbital elements
+            rock = rock.analytic_propagate(t[i])
+            pos = (rock.x[0].to(u.AU).value,
+                   rock.y[0].to(u.AU).value,
+                   rock.z[0].to(u.AU).value)
+            out.append(pos)
+        self._data = rock
+        if len(t)==1:
+            out = out[0]
+        else:
+            # reshape
+            xout = [p[0] for p in out]
+            yout = [p[1] for p in out]
+            zout = [p[2] for p in out]
+            out = (xout,yout,zout)
+        return out
+
+    @property
+    def a(self):
+        """ Semi-major axis in AU """
+        return self._data.a[0].to(u.AU).value
+
+    @property
+    def e(self):
+        """ Eccentricity """
+        return self._data.e[0]
+
+    @property
+    def inc(self):
+        """ Inclination """
+        return self._data.inc[0].deg
+
+    @property
+    def node(self):
+        """ Longitude of the ascending Node in deg """
+        return self._data.node[0].deg
+
+    @property
+    def arg(self):
+        """ Argument of periapsis/perihelion (omega) in deg """
+        return self._data.arg[0].deg
+
+    @property
+    def M(self):
+        """ Mean anomaly at epoch in deg """
+        return self._data.M[0].deg
+    
+    @property
+    def epoch(self):
+        return self._data.epoch[0].jd
+
+    @property
+    def elems(self):
+        """ Orbital elements."""
+        return self.a,self.e,self.inc,self.node,self.arg,self.M,self.epoch
+    
+    @property
+    def position(self):
+        """ Return position in AU."""
+        out = (self._data.x[0].to(u.AU).value,
+               self._data.y[0].to(u.AU).value,
+               self._data.z[0].to(u.AU).value)
+        return out
+
+    @property
+    def velocity(self):
+        """ Return position in AU."""
+        out = (self._data.vx[0].to(u.AU/u.day).value,
+               self._data.vy[0].to(u.AU/u.day).value,
+               self._data.vz[0].to(u.AU/u.day).value)
+        return out
+
+    @property
+    def state(self):
+        """ Return state in AU and AU/day."""
+        return self.position + self.velocity
+    
+    def obs2xyz(self,ra,dec,distance,epoch):
+        """ Get barycentric xyz from ra/dec/distance/epoch."""
+        # Get position relative to earth
+        coo = SkyCoord(ra=ra*u.deg,dec=dec*u.deg,distance=distance*u.AU,
+                       frame='icrs')
+        ecoo = coo.transform_to('geocentricmeanecliptic')
+        xobs,yobs,zobs = (ecoo.cartesian.x.to(u.AU).value,
+                          ecoo.cartesian.y.to(u.AU).value,
+                          ecoo.cartesian.z.to(u.AU).value)
+        # Earth position
+        xearth,yearth,zearth = self(epoch)
+        # Barycentric positions
+        x = xobs + xearth
+        y = yobs + yearth
+        z = zobs + zearth
+        return x,y,z
+
+    def obs2state(self,ra,dec,distance,epoch):
+        """ Convert observed quantities to state vector """
+        x,y,z = self.obs2xyz(ra,dec,distance,epoch)
+        mnt = np.mean(epoch)
+        ind1 = np.argmin(epoch)
+        ind2 = np.argmax(epoch)
+        dt = epoch[ind2]-epoch[ind1]
+        vx = (x[ind2]-x[ind1])/dt
+        vy = (y[ind2]-y[ind1])/dt
+        vz = (z[ind2]-z[ind1])/dt
+        # in AU per day
+        state = [np.mean(x),np.mean(y),np.mean(z),vx,vy,vz]
+        return state,mnt
+    
+    def obs2elem(self,ra,dec,distance,epoch):
+        """ Use observed quantities to calculate orbital elements """
+        state,mnt = self.obs2state(ra,dec,distance,epoch)
+        elem = orbelem.calc_classical_elements(state,mnt)
+        # a, e, inc, Omega (node),omega (argument), M, epoch
+        out = (elem.major_axis,elem.ecc,elem.incl,
+               elem.asc_node,elem.arg_per,elem.mean_anomaly,elem.epoch)
+        return out
+
+class RockSampler(object):
+
+    def __init__(self):
+        self._earth = EarthRock()
+
+    def obs2xyz(self,ra,dec,distance,epoch):
+        """ Get barycentric xyz from ra/dec/distance/epoch."""
+        # Get position relative to earth
+        coo = SkyCoord(ra=ra*u.deg,dec=dec*u.deg,distance=distance*u.AU,
+                       frame='icrs')
+        ecoo = coo.transform_to('geocentricmeanecliptic')
+        xobs,yobs,zobs = (ecoo.cartesian.x.to(u.AU).value,
+                          ecoo.cartesian.y.to(u.AU).value,
+                          ecoo.cartesian.z.to(u.AU).value)
+        # Earth position
+        xearth,yearth,zearth = self._earth(epoch)
+        # Barycentric positions
+        x = xobs + xearth
+        y = yobs + yearth
+        z = zobs + zearth
+        return x,y,z
+
+    def obs2state(self,ra,dec,distance,epoch):
+        """ Convert observed quantities to state vector """
+        x,y,z = self.obs2xyz(ra,dec,distance,epoch)
+        mnt = np.mean(epoch)
+        ind1 = np.argmin(epoch)
+        ind2 = np.argmax(epoch)
+        dt = epoch[ind2]-epoch[ind1]
+        vx = (x[ind2]-x[ind1])/dt
+        vy = (y[ind2]-y[ind1])/dt
+        vz = (z[ind2]-z[ind1])/dt
+        # in AU per day
+        state = [np.mean(x),np.mean(y),np.mean(z),vx,vy,vz]
+        return state,mnt
+    
+    def obs2elem(self,ra,dec,distance,epoch):
+        """ Use observed quantities to calculate orbital elements """
+        state,mnt = self.obs2state(ra,dec,distance,epoch)
+        elem = orbelem.calc_classical_elements(state,mnt)
+        # a, e, inc, Omega (node),omega (argument), M, epoch
+        out = (elem.major_axis,elem.ecc,elem.incl,
+               elem.asc_node,elem.arg_per,elem.mean_anomaly,elem.epoch)
+        return out
+
+    def reasonableorbit(self,elem,epoch=None):
+        """ Is this a reasonable orbit """
+        if len(elem)==7:
+            a,e,i,Omega,omega,M,epoch = elem
+        elif len(elem)==6:
+            a,e,i,Omega,omega,M = elem
+        else:
+            raise ValueError('elem must have 6 or 7 values')
+        el = orbelem.Elements()
+        el.major_axis = a
+        el.ecc = e
+        el.incl = i
+        el.asc_node = Omega
+        el.arg_per = omega
+        el.mean_anomaly = M
+        el.epoch = epoch
+        state = el.state
+        rvec = state[:3]
+        vvec = state[3:]
+        # current velocity and distance
+        r = np.linalg.norm(rvec)
+        v = np.linalg.norm(vvec)
+
+        # flag = True for a reasonable orbit
+        # flag = False for an unreasonable orbit
+        flag = True  # good to start
+        if a<0:
+            flag = False
+        elif np.abs(a)<1e-5:
+            flag = False
+        if ~np.isfinite(r):
+            flag = False
+        if ~np.isfinite(v):
+            flag = False
+        if r<1e-5:     # too small
+            flag = False
+        if r>10000:    # too far away
+            flag = False
+        if v<1e-5:     # too small
+            flag = True
+        if v>0.05*c_au_per_day:  # too fast
+            flag = False
+        
+        return flag
+
+def sampler(tab,nsamples=10000):
+    """ Sampler for tracklet. """
+
+    # Run lots of samples on the distance of the first tracklet measurement
+    # and the distance of the second tracklet measurement
+    # See if any of those give reasonable orbits
+
+    # Perform rejection sampling
+
+    # Get time
+    if 'time' in tab.colnames:
+        t = tab['time']
+    elif 't' in tab.colnames:
+        t = tab['t']
+    elif 'mjd' in tab.colnames:
+        t = tab['mjd']+2400000.5
+    elif 'jd' in tab.colnames:
+        t = tab['jd']
+
+    # Coordinates
+    ra = tab['ra']
+    dec = tab['dec']
+    if 'raerr' in tab.colnames:
+        ra_error = tab['raerr']
+    elif 'ra_error' in tab.colnames:
+        ra_error = tab['ra_error']
+    else:
+        ra_error = ra*0+0.1
+    if 'decerr' in tab.colnames:
+        dec_error = tab['decerr']
+    elif 'dec_error' in tab.colnames:
+        dec_error = tab['dec_error']
+    else:
+        dec_error = dec*0+0.1        
+
+    # Start the RockSampler object
+    rs = RockSampler()
+
+    # Want first and last observations
+    ind1 = np.argmin(t)
+    ind2 = np.argmax(t)
+    rr = [ra[ind1],ra[ind2]]
+    dd = [dec[ind1],dec[ind2]]
+    tt = [t[ind1],t[ind2]]
+    dtime = tt[1]-tt[0]  # in days
+
+    # speed of light is 1 AU in 8 min
+    # max disance is 5% of light speed
+    maxdist = dtime/(0.05*c_au_per_day)
+    
+    r1range = [-3,2]  # log
+    dr2range = [-maxdist,maxdist]
+    
+    # Create the samples
+    r1samples = 10**np.random.uniform(r1range[0],r1range[1],nsamples)
+    dr2samples = np.random.uniform(dr2range[0],dr2range[1],nsamples)
+    
+    dt = [('r1',float),('r2',float),('valid',bool),('elem',float,6),
+          ('state',float,6),('r',float),('v',float)]
+    res = np.zeros(nsamples,dtype=np.dtype(dt))
+
+    # Could do a while loop until we have enough valid orbits
+    
+    # Sample loop
+    for i in range(nsamples):
+        if i % 500 == 0: print(i)
+        r1 = r1samples[i]
+        dr2 = dr2samples[i]
+        r2 = r1 + dr2
+        r2 = np.maximum(r2,0.001)  # make sure it's positive
+        dist = [r1,r2]
+        try:
+            elem = rs.obs2elem(rr,dd,dist,tt)
+            state = orbelem.calc_state(elem[:6],elem[6])
+            valid = rs.reasonableorbit(elem)
+        except KeyboardInterrupt:
+            return            
+        except:
+            valid = False
+            elem = (np.nan,np.nan,np.nan,np.nan,np.nan,np.nan,np.nan)
+            state = (np.nan,np.nan,np.nan,np.nan,np.nan,np.nan)
+        res['r1'][i] = r1
+        res['r2'][i] = r2
+        res['valid'][i] = valid
+        res['elem'][i] = elem[:6]
+        res['state'][i] = state
+        res['r'][i] = np.linalg.norm(state[:3])
+        res['v'][i] = np.linalg.norm(state[3:])
+        #print(i,valid)
+        #print('  ',elem)
+
+        #import pdb; pdb.set_trace()
+
+    gd, = np.where(res['valid'])
+    vres = res[gd]
+        
+    #import pdb; pdb.set_trace()
+
+    return vres
+    
 # Sampler for SSO orbit tracklets
 class TrackletSampler(object):
 

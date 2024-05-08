@@ -53,7 +53,11 @@ SQRT_2 = 1.4142135623730950488016887242096980785696718753769480731766797
 
 GAUSS_K = 0.01720209895
 #SOLAR_GM = (GAUSS_K * GAUSS_K)
-SOLAR_GM = 0.00029631   # spacerocks value
+SOLAR_GM = 0.00029631   # spacerocks value, bary
+# in AU^3/day^2
+# GM_helio = 0.00029591220828411951
+# GM_bary = 0.00029630927493457475
+
 
 # G = 6.67430 x 10^-11 N m^2 / kg^2
 # solar mass = 1.98847 x 10^30 kg
@@ -97,6 +101,8 @@ class Elements(object):
         self.gm = 0.0
         self.is_asteroid = False
         self.central = False
+        self.orbit_type = 0  # 1: elliptical, 2: parabolic, 3: hyperbolic
+        self._state = None
         
         # double perih_time, q, ecc, incl, arg_per, asc_node;
         # double epoch,  mean_anomaly;
@@ -108,11 +114,25 @@ class Elements(object):
         # int is_asteroid, central_obj;
 
     def __repr__(self):
-        out = ''
-        for d in dir(self):
-            if d[0] != '_':
-                out += '{:} = {:}\n'.format(d,getattr(self,d))
+        out = '<Elements ['
+        vals = []
+        cols = ['major_axis','ecc','incl','asc_node','arg_per','mean_anomaly','epoch']
+        names = ['a','e','i','node','arg','M','t']
+        for c,n in zip(cols,names):
+            vals.append('{:}={:.3f}'.format(n,getattr(self,c)))
+        out += ','.join(vals)
+        out += ']>'
         return out
+
+    @property
+    def state(self):
+        """ Return the state vector """
+        if self._state is None:
+            elem = [self.major_axis,self.ecc,self.incl,
+                    self.asc_node,self.arg_per,self.mean_anomaly]
+            state = calc_state(elem,self.epoch)
+            self._state = state
+        return self._state
 
 def remaining_terms(ival):
     rval = 0.0
@@ -147,7 +167,7 @@ def calc_classical_elements(state, t, gm=SOLAR_GM, ref=True):
     Returns
     -------
     elem : Elements object
-       Elements objects with all of the orbital elements information.
+       Elements object with all of the orbital elements information.
 
     Examples
     --------
@@ -187,7 +207,7 @@ def calc_classical_elements(state, t, gm=SOLAR_GM, ref=True):
     assert h0 > 0.0      # or if its velocity vector runs through the sun
     n0 = math.sqrt(n0)   # component of ang. mom. NOT in the plane
     h0 = math.sqrt(h0)   # specific angular momentum
-
+    
     # See Danby,  p 204-206,  for much of this:
     
     if ref:
@@ -276,7 +296,19 @@ def calc_classical_elements(state, t, gm=SOLAR_GM, ref=True):
                 elem.arg_per = math.pi - elem.arg_per
         if e[2] < 0.0:
             elem.arg_per = math.pi + math.pi - elem.arg_per
-    
+
+    elem.epoch = t
+            
+    # elliptical orbit
+    if ecc>=0 and ecc<1:
+        elem.orbit_type = 1  # ellipse
+    elif ecc==1:
+        elem.orbit_type = 2  # parabolic
+    elif ecc>1:
+        elem.orbit_type = 3  # hyperbolic
+    else:
+        elem.orbit_type = 0  # ??
+            
     if inv_major_axis and elem.minor_to_major:
         is_nearly_parabolic = 0.99999 < ecc < 1.00001
         #r_cos_true_anom = dot_product(r, e)
@@ -320,7 +352,7 @@ def calc_classical_elements(state, t, gm=SOLAR_GM, ref=True):
             tau = -tau
         elem.w0 = (3.0 / math.sqrt(2)) / (elem.q * math.sqrt(elem.q / elem.gm))
         elem.perih_time = t - tau * (tau * tau / 3.0 + 1) * 3.0 / elem.w0
-
+        
     # At this point,  elem.sideways has length h0.  Make it a unit vect:
     for i in range(3):
         elem.perih_vec[i] = e[i]
@@ -397,9 +429,36 @@ def M_to_E(M,e):
     E = np.rad2deg(Erad)
     return E
         
-def calc_classical_elements(elem, t, gm=SOLAR_GM):
+def calc_state(elem, t, gm=SOLAR_GM):
     """
     Calculate the state vector from the orbital elements and epoch.
+
+    Parameters
+    ----------
+    elem : numpy array or list
+       Orbital elements:
+           a : semi-major axis (in AU)
+           e : eccentricity
+           inc : inclination (in deg)
+           Omega : longitude of ascending node (in deg)
+           omega : argument of perihelion (in deg)
+           M : mean anomaly (in deg)
+    t : float
+       JD Epoch in days.
+    gm : float, optional
+       The standard gravitational parameters (G*M) in AU^3/day^2
+
+    Returns
+    -------
+    state : numpy array
+       Barycentric cartesians position and velocities in AU and AU/day.
+         [x, y, z, vx, vy, vz].
+
+    Examples
+    --------
+
+    state = calc_state(elem,t)
+
     """
     # https://orbital-mechanics.space/classical-orbital-elements/orbital-elements-and-the-state-vector.html
 
@@ -409,14 +468,14 @@ def calc_classical_elements(elem, t, gm=SOLAR_GM):
     a,e,inc,Omega,omega,M = elem
     mu = gm
 
-    # r_peri = h/mu * 1/(1+e)
+    # r_peri = h**2/mu * 1/(1+e)
     rperi = a*(1-e)
-    h = mu * rperi * (1+e)
+    h = np.sqrt(mu * rperi * (1+e))
     
     # from mean anomaly to eccentric anomaly
     # https://en.wikipedia.org/wiki/Elliptic_orbit
     # Kepler's equation: M = E - e*sin(E)
-    E = M_to_E(M)  # in degree
+    E = M_to_E(M,e)  # in degree
     # from eccentric anomaly to true anomaly
     # https://en.wikipedia.org/wiki/True_anomaly
     nu = np.arccos((np.cos(np.deg2rad(E))-e)/(1-e*np.cos(np.deg2rad(E))))
@@ -429,10 +488,10 @@ def calc_classical_elements(elem, t, gm=SOLAR_GM):
     # Step 2: Rotate the perifocal plane
     from scipy.spatial.transform import Rotation
 
-    R = Rotation.from_euler("ZXZ", [-omega, -i, -Omega])
+    R = Rotation.from_euler("ZXZ", [-np.deg2rad(omega), -np.deg2rad(inc), -np.deg2rad(Omega)])    
     r_rot = r_w @ R.as_matrix()
     v_rot = v_w @ R.as_matrix()
 
-    state = [r_rot[:], v_rot[:]]
+    state = np.concatenate((r_rot,v_rot))
 
     return state
